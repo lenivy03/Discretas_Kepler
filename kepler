@@ -1,0 +1,221 @@
+import pandas as pd
+try:
+    from pyproj import CRS, Transformer
+    PYPROJ_AVAILABLE = True
+except ImportError:
+    PYPROJ_AVAILABLE = False
+    print("ADVERTENCIA: La biblioteca 'pyproj' no está instalada. No se podrá realizar la conversión de coordenadas.")
+    print("Por favor, instálela con: pip install pyproj")
+
+# --- CONFIGURACIÓN ---
+file_path = "hermosillo_temps_2016.csv"
+
+SOURCE_CRS_EPSG = "EPSG:32612" # WGS84 UTM Zone 12N (Ajusta si es diferente)
+TARGET_CRS_EPSG = "EPSG:4326"  # WGS84 (Latitud/Longitud) para Kepler.gl
+
+x_col_primary = 'X'
+y_col_primary = 'Y'
+z_col_primary = 'Z'
+
+temp_col_day4 = '4'
+temp_col_day180 = '180'
+temp_col_day164 = '164' # <--- AJUSTADO A '164'
+
+x_col_alternative = 'Este_NO_USADO'
+y_col_alternative = 'Norte_NO_USADO'
+z_col_alternative = 'Elev_NO_USADO'
+# --- FIN DE CONFIGURACIÓN ---
+
+df = None
+actual_columns = []
+
+try:
+    df = pd.read_csv(file_path)
+    print(f"Successfully loaded the DataFrame '{file_path}'.")
+    actual_columns = df.columns.tolist()
+    print(f"\nColumn names found in the file: {actual_columns}")
+
+except FileNotFoundError:
+    print(f"Error CRÍTICO: El archivo '{file_path}' no fue encontrado.")
+    df = None
+except Exception as e:
+    print(f"Error cargando el archivo CSV '{file_path}': {e}")
+    df = None
+
+if df is not None:
+    x_col = None
+    if x_col_primary in actual_columns:
+        x_col = x_col_primary
+    # ... (lógica de x_col, y_col, z_col sin cambios) ...
+    y_col = None
+    if y_col_primary in actual_columns:
+        y_col = y_col_primary
+    z_col = None
+    if z_col_primary in actual_columns:
+        z_col = z_col_primary
+    
+    if x_col is None or y_col is None: # Asegurar que esta comprobación siga existiendo
+        print(f"\nError CRÍTICO: No se pudieron identificar las columnas de coordenadas X/Y.")
+        df = None # Detener si no hay X o Y
+
+    missing_temp_cols_messages = []
+    if temp_col_day4 not in actual_columns:
+        missing_temp_cols_messages.append(f"'{temp_col_day4}' (Día 4) ausente.")
+    if temp_col_day180 not in actual_columns:
+        missing_temp_cols_messages.append(f"'{temp_col_day180}' (Día 180) ausente.")
+    if temp_col_day164 not in actual_columns: # <--- AJUSTADO A temp_col_day164
+        missing_temp_cols_messages.append(f"'{temp_col_day164}' (Día 164) ausente.") # <--- AJUSTADO A temp_col_day164 y etiqueta
+
+    if missing_temp_cols_messages and df is not None:
+        print("\n--- Advertencias de Columnas de Temperatura Faltantes ---")
+        for msg in missing_temp_cols_messages:
+            print(msg)
+        print("-------------------------------------------------------")
+
+
+if df is not None and PYPROJ_AVAILABLE:
+    def process_convert_and_save(df_input, x_coord_col, y_coord_col, z_coord_col_opt,
+                                 temp_column_name, day_label,
+                                 source_crs, target_crs):
+        # ... (función sin cambios internos, solo se llamará con los parámetros correctos)
+        print(f"\nProcesando datos para {day_label} (columna temp: '{temp_column_name}')...")
+
+        if temp_column_name not in df_input.columns:
+            print(f"Error: Columna '{temp_column_name}' no encontrada. Omitiendo {day_label}.")
+            return None
+        if x_coord_col not in df_input.columns or y_coord_col not in df_input.columns:
+            print(f"Error: Columnas de coordenadas X/Y no encontradas. Omitiendo {day_label}.")
+            return None
+
+        cols_to_select = [x_coord_col, y_coord_col, temp_column_name]
+        current_easting_col_name = 'easting_temp'
+        current_northing_col_name = 'northing_temp'
+        rename_map_initial = {
+            x_coord_col: current_easting_col_name,
+            y_coord_col: current_northing_col_name,
+        }
+
+        if z_coord_col_opt and z_coord_col_opt in df_input.columns:
+            cols_to_select.append(z_coord_col_opt)
+
+        day_df = df_input[cols_to_select].copy()
+        day_df.rename(columns=rename_map_initial, inplace=True)
+
+        day_df[current_easting_col_name] = pd.to_numeric(day_df[current_easting_col_name], errors='coerce')
+        day_df[current_northing_col_name] = pd.to_numeric(day_df[current_northing_col_name], errors='coerce')
+        day_df[temp_column_name] = pd.to_numeric(day_df[temp_column_name], errors='coerce')
+        if z_coord_col_opt and z_coord_col_opt in day_df.columns:
+             day_df[z_coord_col_opt] = pd.to_numeric(day_df[z_coord_col_opt], errors='coerce')
+
+        subset_dropna = [current_easting_col_name, current_northing_col_name, temp_column_name]
+        original_rows = len(day_df)
+        day_df.dropna(subset=subset_dropna, inplace=True)
+        removed_rows = original_rows - len(day_df)
+        if removed_rows > 0:
+            print(f"Se eliminaron {removed_rows} filas con valores NaN para {day_label}.")
+
+        if day_df.empty:
+            print(f"No quedan datos para {day_label} después de la limpieza.")
+            return None
+
+        try:
+            transformer = Transformer.from_crs(source_crs, target_crs, always_xy=True)
+            lons, lats = transformer.transform(day_df[current_easting_col_name].values,
+                                               day_df[current_northing_col_name].values)
+            day_df['longitude'] = lons
+            day_df['latitude'] = lats
+            print(f"Conversión de coordenadas completada para {day_label}.")
+        except Exception as e:
+            print(f"Error CRÍTICO durante la conversión de coordenadas para {day_label} usando CRS origen '{source_crs}': {e}")
+            return None
+
+        final_columns = ['latitude', 'longitude']
+        final_rename_map = {temp_column_name: 'temperature'}
+
+        if z_coord_col_opt and z_coord_col_opt in day_df.columns:
+            final_rename_map[z_coord_col_opt] = 'elevation'
+            final_columns.append(z_coord_col_opt)
+        
+        final_columns.append(temp_column_name)
+
+        output_df = day_df[final_columns].copy()
+        output_df.rename(columns=final_rename_map, inplace=True)
+
+        desired_order = ['latitude', 'longitude', 'temperature']
+        if 'elevation' in output_df.columns:
+            desired_order.append('elevation')
+        
+        ordered_cols = [col for col in desired_order if col in output_df.columns]
+        output_df = output_df[ordered_cols]
+
+        print(f"Procesamiento y conversión completos para {day_label}. {len(output_df)} filas listas.")
+        return output_df
+
+
+    # --- Procesar datos para el Día 4 ---
+    # ... (bloque del día 4 sin cambios) ...
+    df_day4_kepler = None
+    if temp_col_day4 in actual_columns:
+        df_day4_kepler = process_convert_and_save(df, x_col, y_col, z_col,
+                                                  temp_col_day4, "Día 4",
+                                                  SOURCE_CRS_EPSG, TARGET_CRS_EPSG)
+        if df_day4_kepler is not None and not df_day4_kepler.empty:
+            output_csv_day4 = "hermosillo_dia004_kepler.csv"
+            try:
+                df_day4_kepler.to_csv(output_csv_day4, index=False, float_format='%.6f')
+                print(f"\nSe creó '{output_csv_day4}' con {len(df_day4_kepler)} filas.")
+                print(f"Columnas: {df_day4_kepler.columns.tolist()}")
+            except Exception as e:
+                print(f"Error al guardar CSV para Día 4: {e}")
+    else:
+        print(f"\nSe omite Día 4 (columna '{temp_col_day4}' ausente).")
+
+
+    # --- Procesar datos para el Día 180 ---
+    # ... (bloque del día 180 sin cambios) ...
+    df_day180_kepler = None
+    if temp_col_day180 in actual_columns:
+        df_day180_kepler = process_convert_and_save(df, x_col, y_col, z_col,
+                                                   temp_col_day180, "Día 180",
+                                                   SOURCE_CRS_EPSG, TARGET_CRS_EPSG)
+        if df_day180_kepler is not None and not df_day180_kepler.empty:
+            output_csv_day180 = "hermosillo_dia180_kepler.csv"
+            try:
+                df_day180_kepler.to_csv(output_csv_day180, index=False, float_format='%.6f')
+                print(f"\nSe creó '{output_csv_day180}' con {len(df_day180_kepler)} filas.")
+                print(f"Columnas: {df_day180_kepler.columns.tolist()}")
+            except Exception as e:
+                print(f"Error al guardar CSV para Día 180: {e}")
+    else:
+        print(f"\nSe omite Día 180 (columna '{temp_col_day180}' ausente).")
+
+
+    # --- Procesar datos para el Día 164 ---
+    df_day164_kepler = None
+    if temp_col_day164 in actual_columns: # <--- USA temp_col_day164
+        print(f"Se encontró la columna '{temp_col_day164}' para el Día 164. Iniciando procesamiento...")
+        df_day164_kepler = process_convert_and_save(df, x_col, y_col, z_col,
+                                                   temp_col_day164, "Día 164", # <--- USA temp_col_day164 y la etiqueta "Día 164"
+                                                   SOURCE_CRS_EPSG, TARGET_CRS_EPSG)
+        if df_day164_kepler is not None and not df_day164_kepler.empty:
+            output_csv_day164 = "hermosillo_dia164_kepler.csv" # <--- Nombre de archivo "dia164"
+            try:
+                df_day164_kepler.to_csv(output_csv_day164, index=False, float_format='%.6f')
+                print(f"\nSe creó exitosamente '{output_csv_day164}' con {len(df_day164_kepler)} filas.")
+                print(f"Columnas: {df_day164_kepler.columns.tolist()}")
+            except Exception as e:
+                print(f"Error al guardar el CSV para el Día 164: {e}")
+        elif df_day164_kepler is not None and df_day164_kepler.empty:
+             print(f"Se omitió la generación del CSV para el Día 164 ya que no quedaron datos después del procesamiento.")
+    else:
+        print(f"\nSe omite el procesamiento para el Día 164 porque su columna de temperatura ('{temp_col_day164}') está ausente en el archivo de entrada.")
+
+    print("\n\n--- Fin del Script ---")
+
+# ... (final del script sin cambios) ...
+elif df is None and not actual_columns:
+    print("\nProcesamiento detenido: no se pudo cargar el archivo de entrada.")
+elif df is None and actual_columns:
+     print("\nProcesamiento detenido: DataFrame no cargado o faltan columnas críticas.")
+elif not PYPROJ_AVAILABLE:
+    print("\nProcesamiento detenido: la biblioteca 'pyproj' es necesaria para la conversión de coordenadas y no está disponible.")
